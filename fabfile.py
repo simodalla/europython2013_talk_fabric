@@ -1,9 +1,17 @@
 # -*- coding: iso-8859-1 -*-
 
+from __future__ import with_statement
+from contextlib import nested
+
+import datetime
 import os
 
 from fabric.api import *
+from fabric.contrib.console import confirm
 from fabric.contrib.files import exists
+
+
+BACKUP_DATE_FORMAT = "%d_%m_%Y_%H_%S"
 
 
 def host_type():
@@ -56,11 +64,55 @@ def verify_virtualenv():
         run('lssitepackages')
 
 
-def bootstrap(virtualenv='europython2013'):
+def bootstrap(virtualenv='europython2013',
+              project='europython2013_talk_mezzanine'):
     prepare_virtualenv(virtualenv)
+    with cd('/opt/projects/'):
+        run('git clone https://github.com/simodalla/{}.git'.format(
+            project))
+    database_name = 'europython2013_demo'
+    run('createdb -U postgres {}'.format(database_name))
+    with settings(warn_only=True):
+        local('pg_dump -h 127.0.0.1 -Ft {} |'
+              ' pg_restore -U postgres -h {} -d {}'.format(database_name,
+                                                           env['host'],
+                                                           database_name))
+    with nested(cd('/opt/projects/{}/europython2013_demo'.format(project)),
+                prefix('workon {}'.format(virtualenv))):
+        run('python manage.py collectstatic --noinput')
+    run('service apache2 restart')
 
 
-def unbootstrap(virtualenv='europython2013'):
+def deploy(virtualenv='europython2013',
+           project='europython2013_talk_mezzanine'):
+    now = datetime.datetime.now()
+    if not confirm('Sei sicuro di voler fare il deploy del progetto'
+                   ' in produzione?', default=False):
+        abort('Deploy aborted.')
+    project_path = '/opt/projects/{}/europython2013_demo'.format(project)
+    database_name = 'europython2013_demo'
+    run('tar cfz /opt/projects/backup_{}_{}.tar.gz --exclude={}/static'
+        ' {}'.format(project, now.strftime(BACKUP_DATE_FORMAT),
+                     project_path, project_path))
+    run('pg_dump -U postgres -Ft {} >'
+        ' /opt/projects/pg_{}_{}.dump'.format(
+            database_name, project, now.strftime(BACKUP_DATE_FORMAT)))
+    with cd('{}/../'.format(project_path)):
+        run('git pull')
+    with nested(cd(project_path), prefix('workon {}'.format(virtualenv))):
+        # with prefix('workon {}'.format(virtualenv)):
+        run('python manage.py collectstatic --noinput')
+    run('service apache2 restart')
+    # run('supervisorctl restart all')
+
+
+def unbootstrap(virtualenv='europython2013',
+                project='europython2013_talk_mezzanine'):
     run('rm -rf requirements.txt')
     run('rmvirtualenv {}'.format(virtualenv))
     run('apt-get uninstall libapache2-mod-wsgi')
+    with settings(warn_only=True):
+        run('dropdb -U postgres europython2013_demo')
+        run('rm -rf /opt/projects/{}'.format(project))
+        run('rm -rf /opt/projects/backup_europython2013*')
+        run('rm -rf /opt/projects/pg_europython2013*')
